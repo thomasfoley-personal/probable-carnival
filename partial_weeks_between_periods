@@ -1,12 +1,29 @@
-from pyspark.sql import functions as F, SparkSession
 from datetime import datetime, timedelta
-from transforms.api import transform_df, Output
+from pyspark.sql import functions as F, SparkSession
+# from transforms.api import transform_df, Output
 
 
-@transform_df(
-    Output("ri.foundry.main.dataset.b6b0a8f2-747d-492f-9fc6-b5ebfcd20c3a"),
-)
+# @transform_df(
+#    Output("ri.foundry.main.dataset.b6b0a8f2-747d-492f-9fc6-b5ebfcd20c3a"),
+# )
 def compute_weeks():
+    """
+    Compute the percentage of days in each week that belong to the starting month over a date range.
+    This function performs the following steps:
+    1. Creates a date range from January 1, 2023, to December 31, 2028.
+    2. Creates a Spark DataFrame with a column of dates within the specified range.
+    3. Adds columns to the DataFrame to identify the start and end of each week, the month of each date, and the month of the week's start date.
+    4. Groups the DataFrame by week start and start month, calculating the number of days in the start month for each week.
+    5. Calculates the percentage of days in each week that belong to the start month.
+    6. Identifies partial weeks that span two months and calculates the percentage of days in the new month for these partial weeks.
+    7. Combines the regular weeks and partial weeks into a final DataFrame, ordered by week start.
+    Returns:
+        pyspark.sql.DataFrame: A DataFrame with columns:
+            - week_start (date): The start date of the week.
+            - week_end (date): The end date of the week.
+            - start_month (int): The month of the week's start date.
+            - percentage (float): The percentage of days in the week that belong to the start month.
+    """
     spark = SparkSession.builder.getOrCreate()
     # Create basic date range
     start_date = datetime(2023, 1, 1)
@@ -17,18 +34,21 @@ def compute_weeks():
     df = spark.createDataFrame([(d,) for d in dates], ["date"])
 
     # Add week-related columns
-    df = (df.withColumn("week_start", F.date_sub(F.next_day(F.col("date"), "Sat"), 7)) \
-        .withColumn("week_end", F.next_day(F.col("date"), "Sat")) \
-        .withColumn("month", F.month(F.col("date"))) 
+    df = (
+        df.withColumn("week_start", F.date_sub(F.next_day(F.col("date"), "Sat"), 7))
+        .withColumn("week_end", F.next_day(F.col("date"), "Sat"))
+        .withColumn("month", F.month(F.col("date")))
         .withColumn("start_month", F.month(F.col("week_start")))
         )
     # Calculate days in start month before grouping
-    df_with_counts = df.groupBy("week_start", "start_month") \
+    df_with_counts = (
+        df.groupBy("week_start", "start_month")
         .agg(
             F.max("week_end").alias("week_end"),
             F.count_distinct("month").alias("month_count"),
             F.sum(F.when(F.month(F.col("date")) == F.col("start_month"), 1).otherwise(0)).alias("same_month_days")
         )
+    )
 
     # Calculate percentage for regular weeks
     weeks_df = df_with_counts.withColumn(
@@ -40,15 +60,17 @@ def compute_weeks():
     )
 
     # Create partial week rows starting from 1st of next month
-    partial_weeks = weeks_df.filter(F.col("month_count") > 1) \
-        .withColumn("new_start", F.date_add(F.trunc(F.col("week_end"), "month"), 0)) \
-        .filter(F.col("new_start") < F.col("week_end")) \
+    partial_weeks = (
+        weeks_df.filter(F.col("month_count") > 1)
+        .withColumn("new_start", F.date_add(F.trunc(F.col("week_end"), "month"), 0))
+        .filter(F.col("new_start") < F.col("week_end"))
         .select(
             F.col("new_start").alias("week_start"),
             F.col("week_end"),
             F.month(F.col("new_start")).alias("start_month"),
-            F.datediff(F.col("week_end"), F.col("new_start")).alias("days_in_week")
-        ).withColumn("percentage", F.round((F.col("days_in_week") / 7) * 100, 2))
+            F.datediff(F.col("week_end"), F.col("new_start")).alias("days_in_week"))
+        .withColumn("percentage", F.round((F.col("days_in_week") / 7) * 100, 2))
+    )
 
     # Combine regular and partial weeks
     final_df = weeks_df.select(
